@@ -1,8 +1,8 @@
 # BlinkGuard — Project State
 
 ## Current Phase
-- **Phase:** 1 (Foundation & Critical Fixes) — **DONE** ✅
-- **Next action:** `/gsd:plan-phase 2`
+- **Phase:** 2 (New Features) — **PLANNED**
+- **Next action:** `/gsd:execute-phase 2`
 
 ## Session Log
 | Date | Action | Details |
@@ -11,6 +11,7 @@
 | 2026-04-11 | `/gsd:new-project` | PROJECT, REQUIREMENTS, ROADMAP, STATE, config created |
 | 2026-04-11 | `/gsd:plan-phase 1` | Detailed PLAN.md with 5 tasks, file-level changes, verification |
 | 2026-04-11 | `/gsd:execute-phase 1` | All 5 tasks completed, committed, syntax verified |
+| 2026-04-11 | `/gsd:plan-phase 2` | Detailed PLAN.md with 4 tasks — sleep/wake, tray, mutex, IPC port |
 
 ## Decisions
 | # | Decision | Rationale |
