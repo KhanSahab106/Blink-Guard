@@ -118,6 +118,24 @@ class SharedState:
             self.session_alerts_fired += 1
             self.consecutive_misses += 1
 
+    def reset_session(self) -> None:
+        """Reset all per-session counters for a fresh session.
+
+        Called after sleep/wake to start a new session without restarting
+        the entire process.  Caller must NOT hold the lock.
+        """
+        with self.lock:
+            now = time.time()
+            self.blink_timestamps = []
+            self.last_blink_time = now
+            self.session_start_time = now
+            self.session_blink_count = 0
+            self.session_alerts_fired = 0
+            self.consecutive_misses = 0
+            self.escalation_level = 0
+            self.escalation_counts = {}
+            self.ear_history = []
+
     def get_session_duration_minutes(self) -> float:
         return (time.time() - self.session_start_time) / 60.0
 

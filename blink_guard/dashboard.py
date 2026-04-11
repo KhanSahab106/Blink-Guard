@@ -66,7 +66,32 @@ ctk.set_default_color_theme("blue")
 # Main
 # ---------------------------------------------------------------------------
 
+def _is_already_running() -> bool:
+    """Check if another dashboard instance is already running via a named mutex."""
+    try:
+        import ctypes
+        kernel32 = ctypes.windll.kernel32
+        ERROR_ALREADY_EXISTS = 183
+        # Try to create a named mutex
+        mutex = kernel32.CreateMutexW(None, False, "BlinkGuardDashboard_SingleInstance")
+        if ctypes.GetLastError() == ERROR_ALREADY_EXISTS:
+            # Another instance owns the mutex
+            if mutex:
+                kernel32.CloseHandle(mutex)
+            return True
+        # We now own the mutex — keep it alive for the process lifetime
+        # (it will be released automatically when the process exits)
+        return False
+    except Exception:
+        # If ctypes fails (unlikely on Windows), allow the app to run
+        return False
+
+
 def main() -> None:
+    if _is_already_running():
+        logger.info("Dashboard is already running — exiting duplicate instance.")
+        return
+
     logger.info("=" * 60)
     logger.info("BlinkGuard Dashboard starting.")
     logger.info("=" * 60)

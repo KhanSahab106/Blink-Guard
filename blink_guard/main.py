@@ -83,11 +83,27 @@ from blink_guard.weekly import (                                 # noqa: E402
 # Windows session-event listener
 # ---------------------------------------------------------------------------
 
+def _on_wake_reset(shared: SharedState) -> None:
+    """Finalize the pre-sleep session and start a fresh one."""
+    try:
+        # Only finalize if there was meaningful activity
+        if shared.session_blink_count > 0:
+            _finalise_session(shared)
+            logger.info("Pre-sleep session finalized (%d blinks).", shared.session_blink_count)
+    except Exception:
+        logger.exception("Failed to finalize pre-sleep session.")
+
+    shared.reset_session()
+    shared.set_detector_state(DetectorState.WATCHING)
+    logger.info("Session reset after wake — new session started.")
+
+
 def _start_session_watcher(shared: SharedState) -> threading.Thread | None:
-    """Listen for Windows lock / unlock / sleep events.
+    """Listen for Windows lock / unlock / sleep / wake events.
 
     Uses win32ts WTSRegisterSessionNotification through a hidden message
-    window.  Falls back gracefully if pywin32 is not available.
+    window.  Also handles WM_POWERBROADCAST for sleep/wake detection.
+    Falls back gracefully if pywin32 is not available.
     """
     try:
         import win32api
@@ -102,6 +118,10 @@ def _start_session_watcher(shared: SharedState) -> threading.Thread | None:
     WTS_SESSION_LOCK = 0x7
     WTS_SESSION_UNLOCK = 0x8
 
+    WM_POWERBROADCAST = 0x0218
+    PBT_APMSUSPEND = 0x0004
+    PBT_APMRESUMEAUTOMATIC = 0x0012
+
     def _wnd_proc(hwnd, msg, wparam, lparam):
         if msg == WM_WTSSESSION_CHANGE:
             if wparam == WTS_SESSION_LOCK:
@@ -110,6 +130,17 @@ def _start_session_watcher(shared: SharedState) -> threading.Thread | None:
             elif wparam == WTS_SESSION_UNLOCK:
                 logger.info("Screen unlocked — resuming detector.")
                 shared.set_detector_state(DetectorState.WATCHING)
+        elif msg == WM_POWERBROADCAST:
+            if wparam == PBT_APMSUSPEND:
+                logger.info("System suspending — pausing detector.")
+                shared.set_detector_state(DetectorState.PAUSED)
+            elif wparam == PBT_APMRESUMEAUTOMATIC:
+                logger.info("System woke from sleep — resetting session.")
+                # Run reset in a separate thread to avoid blocking the message pump
+                threading.Thread(
+                    target=_on_wake_reset, args=(shared,),
+                    name="WakeReset", daemon=True,
+                ).start()
         return win32gui.DefWindowProc(hwnd, msg, wparam, lparam)
 
     def _listener():

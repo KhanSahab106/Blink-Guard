@@ -19,6 +19,7 @@ Message types (server → client):
 """
 
 import json
+import os
 import socket
 import threading
 import logging
@@ -30,7 +31,42 @@ logger = logging.getLogger("BlinkGuard")
 
 IPC_HOST = "127.0.0.1"
 IPC_PORT = 57821
+IPC_PORTS = [57821, 57822, 57823, 57824, 57825]
 BUFFER_SIZE = 1024 * 1024  # 1 MB for camera frames
+
+
+def _port_file_path() -> str:
+    """Return path to the blinkguard.port lock file."""
+    from blink_guard.defaults import settings_path
+    return os.path.join(os.path.dirname(settings_path()), "blinkguard.port")
+
+
+def _write_port_file(port: int) -> None:
+    """Write the active IPC port to a lock file."""
+    try:
+        with open(_port_file_path(), "w") as f:
+            f.write(str(port))
+    except OSError:
+        logger.warning("Failed to write port file.")
+
+
+def _read_port_file() -> int | None:
+    """Read the IPC port from the lock file. Returns None if not found."""
+    try:
+        with open(_port_file_path(), "r") as f:
+            return int(f.read().strip())
+    except (FileNotFoundError, ValueError, OSError):
+        return None
+
+
+def _remove_port_file() -> None:
+    """Remove the port lock file."""
+    try:
+        os.remove(_port_file_path())
+    except FileNotFoundError:
+        pass
+    except OSError:
+        logger.warning("Failed to remove port file.")
 
 
 # ---------------------------------------------------------------------------
@@ -70,16 +106,37 @@ class IPCServer:
                 self._server_socket.close()
             except OSError:
                 pass
+        _remove_port_file()
 
     def _serve(self) -> None:
-        """Main server loop: accept connections and handle them."""
+        """Main server loop: try ports in order, accept connections."""
+        bound_port = None
         try:
             self._server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             self._server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             self._server_socket.settimeout(1.0)
-            self._server_socket.bind((IPC_HOST, IPC_PORT))
+
+            # Try each port until one works
+            for port in IPC_PORTS:
+                try:
+                    self._server_socket.bind((IPC_HOST, port))
+                    bound_port = port
+                    break
+                except OSError:
+                    logger.info("Port %d unavailable, trying next...", port)
+                    # Need a fresh socket for the next attempt
+                    self._server_socket.close()
+                    self._server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                    self._server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                    self._server_socket.settimeout(1.0)
+
+            if bound_port is None:
+                logger.error("IPC server: all ports %s are occupied!", IPC_PORTS)
+                return
+
             self._server_socket.listen(2)
-            logger.info("IPC server listening on %s:%d", IPC_HOST, IPC_PORT)
+            _write_port_file(bound_port)
+            logger.info("IPC server listening on %s:%d", IPC_HOST, bound_port)
 
             while self._running:
                 try:
@@ -174,20 +231,41 @@ class IPCClient:
         return self._connected
 
     def connect(self) -> bool:
-        """Attempt to connect to the background process."""
+        """Attempt to connect to the background process.
+
+        Reads the port file first, then falls back to scanning all known ports.
+        """
         with self._lock:
             if self._connected:
                 return True
-            try:
-                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                sock.settimeout(2.0)
-                sock.connect((IPC_HOST, IPC_PORT))
-                self._socket = sock
-                self._connected = True
-                return True
-            except (ConnectionRefusedError, socket.timeout, OSError):
-                self._connected = False
-                return False
+
+            # Try the port file first
+            ports_to_try = []
+            file_port = _read_port_file()
+            if file_port is not None:
+                ports_to_try.append(file_port)
+            # Then try all known ports (excluding the one we already tried)
+            for p in IPC_PORTS:
+                if p not in ports_to_try:
+                    ports_to_try.append(p)
+
+            for port in ports_to_try:
+                try:
+                    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                    sock.settimeout(2.0)
+                    sock.connect((IPC_HOST, port))
+                    self._socket = sock
+                    self._connected = True
+                    return True
+                except (ConnectionRefusedError, socket.timeout, OSError):
+                    try:
+                        sock.close()
+                    except OSError:
+                        pass
+                    continue
+
+            self._connected = False
+            return False
 
     def disconnect(self) -> None:
         """Close connection."""

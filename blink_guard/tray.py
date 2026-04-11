@@ -193,7 +193,7 @@ def run_tray(shared: SharedState) -> None:
             Item(lambda _: _dnd_label(shared), None, enabled=False),
             Item(lambda _: _escalation_label(shared), None, enabled=False),
             pystray.Menu.SEPARATOR,
-            Item("📊 Open Dashboard", lambda icon, _: _open_dashboard()),
+            Item("📊 Open Dashboard", lambda icon, _: _open_dashboard(), default=True),
             pystray.Menu.SEPARATOR,
             Item(
                 lambda _: "▶ Resume" if _is_paused(shared) else "⏸ Pause",
