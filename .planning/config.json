@@ -1,0 +1,16 @@
+{
+  "project_name": "BlinkGuard",
+  "created": "2026-04-11",
+  "workflow_version": "gsd-3.0",
+  "preferences": {
+    "commit_style": "conventional",
+    "branch_strategy": "trunk",
+    "test_framework": "pytest",
+    "review_level": "thorough",
+    "auto_commit": false,
+    "research_enabled": false
+  },
+  "phases_total": 4,
+  "current_phase": 0,
+  "current_milestone": null
+}
