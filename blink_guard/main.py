@@ -64,20 +64,8 @@ from blink_guard.detector import run_detector                   # noqa: E402
 from blink_guard.tray import run_tray                           # noqa: E402
 from blink_guard.alerts import init_sound, shutdown_sound        # noqa: E402
 from blink_guard.startup import set_launch_on_startup            # noqa: E402
-from blink_guard.adaptive import (                               # noqa: E402
-    compute_baseline,
-    update_phase,
-    should_count_session,
-    OBSERVATION_SESSIONS,
-)
-from blink_guard.ipc import IPCServer                            # noqa: E402
-from blink_guard.risk import compute_risk_score                  # noqa: E402
-from blink_guard.weekly import (                                 # noqa: E402
-    should_generate_weekly,
-    generate_summary_card,
-    show_toast_notification,
-    record_weekly_summary,
-)
+from blink_guard.ipc import IPCServer, build_ipc_callbacks       # noqa: E402
+from blink_guard.session import finalise_session, session_updater  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Windows session-event listener
@@ -88,7 +76,7 @@ def _on_wake_reset(shared: SharedState) -> None:
     try:
         # Only finalize if there was meaningful activity
         if shared.session_blink_count > 0:
-            _finalise_session(shared)
+            finalise_session(shared)
             logger.info("Pre-sleep session finalized (%d blinks).", shared.session_blink_count)
     except Exception:
         logger.exception("Failed to finalize pre-sleep session.")
@@ -178,200 +166,7 @@ def _start_session_watcher(shared: SharedState) -> threading.Thread | None:
     return t
 
 
-# ---------------------------------------------------------------------------
-# Session-stats updater (Thread 2)
-# ---------------------------------------------------------------------------
 
-SAVE_INTERVAL_SECONDS = 60
-
-
-def _session_updater(shared: SharedState) -> None:
-    """Periodically persist session stats to settings.json."""
-    logger.info("Session updater thread starting.")
-    while not shared.shutdown_event.is_set():
-        shared.shutdown_event.wait(SAVE_INTERVAL_SECONDS)
-        if shared.shutdown_event.is_set():
-            break
-        try:
-            shared.save_settings()
-            logger.debug("Settings saved (periodic).")
-        except Exception:
-            logger.exception("Periodic save failed.")
-    logger.info("Session updater thread stopped.")
-
-
-# ---------------------------------------------------------------------------
-# End-of-session processing
-# ---------------------------------------------------------------------------
-
-def _finalise_session(shared: SharedState) -> None:
-    """Compute end-of-session stats, update adaptive state, and persist."""
-    duration = shared.get_session_duration_minutes()
-    avg_interval = shared.get_avg_blink_interval()
-
-    with shared.lock:
-        blink_count = shared.session_blink_count
-        alerts_fired = shared.session_alerts_fired
-        phase = shared.phase
-        threshold = shared.current_threshold
-        settings = shared.settings
-        escalation_counts = getattr(shared, "escalation_counts", {})
-
-    # --- Compute risk score ---
-    risk_score, risk_band, _risk_color = compute_risk_score(
-        avg_interval, threshold, alerts_fired, duration
-    )
-
-    # --- build session record ---
-    record = {
-        "date": datetime.date.today().isoformat(),
-        "duration_minutes": round(duration, 1),
-        "total_blinks": blink_count,
-        "avg_blink_interval": round(avg_interval, 2) if avg_interval else 0,
-        "alerts_fired": alerts_fired,
-        "threshold_used": threshold,
-        "phase": phase.value,
-        "risk_score": risk_score,
-        "risk_band": risk_band,
-        "escalation_counts": dict(escalation_counts),
-    }
-    history: list = settings.setdefault("session_history", [])
-    history.append(record)
-    logger.info("Session record: %s", record)
-
-    # --- Update hourly alert counts ---
-    hour = datetime.datetime.now().strftime("%H")
-    hourly = settings.setdefault("hourly_data", {})
-    hour_data = hourly.setdefault(hour, {"total_intervals": [], "alert_count": 0})
-    hour_data["alert_count"] = hour_data.get("alert_count", 0) + alerts_fired
-
-    # --- Phase 1: compute baseline after enough observation sessions ---
-    if phase == Phase.OBSERVING:
-        obs_count = sum(
-            1 for s in history if should_count_session(s.get("duration_minutes", 0))
-        )
-        if obs_count >= OBSERVATION_SESSIONS and avg_interval is not None:
-            all_intervals: list[float] = []
-            with shared.lock:
-                ts = shared.blink_timestamps.copy()
-            if len(ts) >= 2:
-                all_intervals = [ts[i + 1] - ts[i] for i in range(len(ts) - 1)]
-
-            baseline = compute_baseline(all_intervals) if all_intervals else (avg_interval or 12.0)
-            with shared.lock:
-                shared.baseline_interval = baseline
-                settings["baseline_interval"] = baseline
-            logger.info("Baseline computed: %.2fs", baseline)
-
-    # --- Count session if long enough ---
-    if should_count_session(duration) and phase != Phase.OBSERVING:
-        settings["sessions_completed"] = settings.get("sessions_completed", 0) + 1
-        if phase == Phase.MAINTENANCE:
-            settings["maintenance_sessions"] = settings.get("maintenance_sessions", 0) + 1
-
-    # --- Phase transitions ---
-    settings = update_phase(settings)
-
-    # --- Weekly summary check ---
-    try:
-        if should_generate_weekly(settings):
-            path = generate_summary_card(settings)
-            if path:
-                record_weekly_summary(settings, path)
-                improvement = 0.0
-                # Try to show toast in background
-                try:
-                    show_toast_notification(path, improvement)
-                except Exception:
-                    pass
-    except Exception:
-        logger.exception("Weekly summary generation failed.")
-
-    # --- Write back ---
-    with shared.lock:
-        shared.settings = settings
-        shared.phase = Phase(settings["phase"])
-        shared.current_threshold = settings.get("current_threshold")
-        shared.baseline_interval = settings.get("baseline_interval")
-
-    shared.save_settings()
-    logger.info("Final settings saved.")
-
-
-# ---------------------------------------------------------------------------
-# IPC callbacks
-# ---------------------------------------------------------------------------
-
-def _build_ipc_callbacks(shared: SharedState):
-    """Create IPC callback functions that read from SharedState."""
-
-    def get_state() -> dict:
-        avg_interval = shared.get_avg_blink_interval()
-        with shared.lock:
-            return {
-                "blink_count": shared.session_blink_count,
-                "avg_interval": avg_interval,
-                "last_blink_ms_ago": int((time.time() - shared.last_blink_time) * 1000),
-                "ear_left": getattr(shared, "ear_left", 0.0),
-                "ear_right": getattr(shared, "ear_right", 0.0),
-                "ear_history": list(getattr(shared, "ear_history", [])),
-                "alerts_fired": shared.session_alerts_fired,
-                "phase": shared.phase.value,
-                "current_threshold": shared.current_threshold,
-                "face_detected": shared.detector_state != DetectorState.FACE_NOT_VISIBLE,
-                "escalation_level": getattr(shared, "escalation_level", 0),
-                "dnd_active": getattr(shared, "dnd_active", False),
-                "dnd_end_time": getattr(shared, "dnd_end_time", None),
-                "escalation_counts": dict(getattr(shared, "escalation_counts", {})),
-            }
-
-    def get_frame() -> bytes | None:
-        return getattr(shared, "last_jpeg_frame", None)
-
-    def handle_command(cmd: str, msg: dict) -> dict:
-        if cmd == "PAUSE":
-            shared.set_detector_state(DetectorState.PAUSED)
-            return {"ok": True}
-        elif cmd == "RESUME":
-            shared.set_detector_state(DetectorState.WATCHING)
-            return {"ok": True}
-        elif cmd == "SET_SETTING":
-            key = msg.get("key")
-            value = msg.get("value")
-            allowed_keys = (
-                "sound_enabled", "launch_on_startup",
-                "alert_volume", "volume", "camera_index",
-                "ear_threshold", "ear_blink_threshold", "ear_open_threshold",
-                "show_landmarks",
-                "total_sessions_planned", "target_threshold",
-                "phase", "baseline_interval",
-                "sessions_completed", "current_threshold",
-                "maintenance_sessions",
-                "alert_sound", "custom_sound_path",
-                "dnd_enabled", "dnd_schedule",
-                "calibrated", "calibration_date",
-            )
-            if key and key in allowed_keys:
-                with shared.lock:
-                    shared.settings[key] = value
-                    if key == "sound_enabled":
-                        shared.sound_enabled = bool(value)
-                    elif key == "launch_on_startup":
-                        shared.launch_on_startup = bool(value)
-                    elif key == "phase":
-                        shared.phase = Phase(value)
-                    elif key == "baseline_interval":
-                        shared.baseline_interval = value
-                    elif key == "current_threshold":
-                        shared.current_threshold = value
-                shared.save_settings()
-                return {"ok": True}
-            return {"error": f"unknown setting: {key}"}
-        elif cmd == "LAUNCH_CONFIRMED":
-            return {"ok": True}
-        return {"error": f"unhandled: {cmd}"}
-
-    return get_state, get_frame, handle_command
 
 
 # ---------------------------------------------------------------------------
@@ -558,7 +353,7 @@ def main() -> None:
         return
 
     # Start IPC server
-    get_state_cb, get_frame_cb, cmd_cb = _build_ipc_callbacks(shared)
+    get_state_cb, get_frame_cb, cmd_cb = build_ipc_callbacks(shared)
     ipc_server = IPCServer(get_state_cb, get_frame_cb, cmd_cb)
     ipc_server.start()
 
@@ -567,7 +362,7 @@ def main() -> None:
         target=run_detector, args=(shared,), name="Detector", daemon=True
     )
     updater_thread = threading.Thread(
-        target=_session_updater, args=(shared,), name="Updater", daemon=True
+        target=session_updater, args=(shared,), name="Updater", daemon=True
     )
 
     detector_thread.start()
@@ -593,7 +388,7 @@ def main() -> None:
 
     # End-of-session bookkeeping
     try:
-        _finalise_session(shared)
+        finalise_session(shared)
     except Exception:
         logger.exception("Failed to finalise session.")
 

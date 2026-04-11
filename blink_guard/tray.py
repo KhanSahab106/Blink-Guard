@@ -101,15 +101,15 @@ def _progress_label(shared: SharedState) -> str:
 
 
 def _dnd_label(shared: SharedState) -> str:
-    dnd_active = getattr(shared, "dnd_active", False)
-    dnd_end = getattr(shared, "dnd_end_time", None)
+    dnd_active = shared.dnd_active
+    dnd_end = shared.dnd_end_time
     if dnd_active:
         return f"🔕 DND active (until {dnd_end or '?'})"
     return "🔕 DND: Off"
 
 
 def _escalation_label(shared: SharedState) -> str:
-    level = getattr(shared, "escalation_level", 0)
+    level = shared.escalation_level
     if level == 0:
         return "🔔 Alert: Idle"
     labels = {1: "🔔 Alert: L1 (Soft)", 2: "🔔 Alert: L2 (Medium)", 3: "🔔 Alert: L3 (Urgent)"}

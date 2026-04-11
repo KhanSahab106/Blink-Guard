@@ -324,3 +324,83 @@ class IPCClient:
 
     def set_setting(self, key: str, value: Any) -> dict | None:
         return self.send({"command": "SET_SETTING", "key": key, "value": value})
+
+
+# ---------------------------------------------------------------------------
+# IPC callback factory
+# ---------------------------------------------------------------------------
+
+def build_ipc_callbacks(shared):
+    """Create IPC callback functions that read from SharedState.
+
+    Returns (get_state, get_frame, handle_command) suitable for IPCServer.
+    """
+    from blink_guard.state import DetectorState, Phase
+
+    def get_state() -> dict:
+        avg_interval = shared.get_avg_blink_interval()
+        with shared.lock:
+            return {
+                "blink_count": shared.session_blink_count,
+                "avg_interval": avg_interval,
+                "last_blink_ms_ago": int((time.time() - shared.last_blink_time) * 1000),
+                "ear_left": shared.ear_left,
+                "ear_right": shared.ear_right,
+                "ear_history": list(shared.ear_history),
+                "alerts_fired": shared.session_alerts_fired,
+                "phase": shared.phase.value,
+                "current_threshold": shared.current_threshold,
+                "face_detected": shared.detector_state != DetectorState.FACE_NOT_VISIBLE,
+                "escalation_level": shared.escalation_level,
+                "dnd_active": shared.dnd_active,
+                "dnd_end_time": shared.dnd_end_time,
+                "escalation_counts": dict(shared.escalation_counts),
+            }
+
+    def get_frame() -> bytes | None:
+        return shared.last_jpeg_frame
+
+    def handle_command(cmd: str, msg: dict) -> dict:
+        if cmd == "PAUSE":
+            shared.set_detector_state(DetectorState.PAUSED)
+            return {"ok": True}
+        elif cmd == "RESUME":
+            shared.set_detector_state(DetectorState.WATCHING)
+            return {"ok": True}
+        elif cmd == "SET_SETTING":
+            key = msg.get("key")
+            value = msg.get("value")
+            allowed_keys = (
+                "sound_enabled", "launch_on_startup",
+                "alert_volume", "volume", "camera_index",
+                "ear_threshold", "ear_blink_threshold", "ear_open_threshold",
+                "show_landmarks",
+                "total_sessions_planned", "target_threshold",
+                "phase", "baseline_interval",
+                "sessions_completed", "current_threshold",
+                "maintenance_sessions",
+                "alert_sound", "custom_sound_path",
+                "dnd_enabled", "dnd_schedule",
+                "calibrated", "calibration_date",
+            )
+            if key and key in allowed_keys:
+                with shared.lock:
+                    shared.settings[key] = value
+                    if key == "sound_enabled":
+                        shared.sound_enabled = bool(value)
+                    elif key == "launch_on_startup":
+                        shared.launch_on_startup = bool(value)
+                    elif key == "phase":
+                        shared.phase = Phase(value)
+                    elif key == "baseline_interval":
+                        shared.baseline_interval = value
+                    elif key == "current_threshold":
+                        shared.current_threshold = value
+                shared.save_settings()
+                return {"ok": True}
+            return {"error": f"unknown setting: {key}"}
+        elif cmd == "LAUNCH_CONFIRMED":
+            return {"ok": True}
+        return {"error": f"unhandled: {cmd}"}
+
+    return get_state, get_frame, handle_command

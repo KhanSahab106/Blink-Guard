@@ -154,6 +154,12 @@ def run_detector(shared: SharedState) -> None:
     # Hourly data tracking
     last_hourly_update = 0.0
 
+    # Camera recovery state
+    consecutive_read_fails = 0
+    MAX_READ_FAILS = 30         # ~1 second at 30fps before triggering recovery
+    RECOVERY_ATTEMPTS = 10
+    RECOVERY_DELAY = 3.0        # seconds between retries
+
     try:
         while not shared.shutdown_event.is_set():
             # --- respect PAUSED state ---
@@ -163,8 +169,42 @@ def run_detector(shared: SharedState) -> None:
 
             ret, frame = cap.read()
             if not ret:
+                consecutive_read_fails += 1
+                if consecutive_read_fails >= MAX_READ_FAILS:
+                    logger.warning(
+                        "Camera disconnected (%d consecutive failures) — attempting recovery...",
+                        consecutive_read_fails,
+                    )
+                    shared.set_detector_state(DetectorState.PAUSED)
+                    cap.release()
+
+                    recovered = False
+                    for attempt in range(1, RECOVERY_ATTEMPTS + 1):
+                        time.sleep(RECOVERY_DELAY)
+                        if shared.shutdown_event.is_set():
+                            logger.info("Shutdown during camera recovery — exiting.")
+                            return
+                        cap = cv2.VideoCapture(cam_index, cv2.CAP_DSHOW)
+                        if cap.isOpened():
+                            cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+                            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+                            logger.info("Camera recovered after %d attempt(s).", attempt)
+                            recovered = True
+                            break
+                        logger.info("Recovery attempt %d/%d failed.", attempt, RECOVERY_ATTEMPTS)
+
+                    if not recovered:
+                        logger.error(
+                            "Camera recovery failed after %d attempts — detector stopping.",
+                            RECOVERY_ATTEMPTS,
+                        )
+                        return
+
+                    consecutive_read_fails = 0
+                    shared.set_detector_state(DetectorState.WATCHING)
                 time.sleep(0.05)
                 continue
+            consecutive_read_fails = 0  # reset on successful read
 
             rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             results = face_mesh.process(rgb)
