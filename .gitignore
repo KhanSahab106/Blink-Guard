@@ -1,0 +1,66 @@
+# ============================================================
+# BlinkGuard .gitignore
+# ============================================================
+
+# ------ Python Virtual Environments ------
+myenv/
+venv/
+env/
+.env
+.venv/
+
+# ------ Python Cache ------
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+*.egg
+pip-log.txt
+pip-delete-this-directory.txt
+
+# ------ Build / Distribution ------
+build/
+dist/
+*.spec
+*.manifest
+
+# ------ PyInstaller ------
+*.exe
+*.dll
+
+# ------ Testing / Coverage ------
+.pytest_cache/
+.coverage
+htmlcov/
+coverage.xml
+*.cover
+
+# ------ IDE / Editor ------
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.project
+.settings/
+
+# ------ OS Files ------
+.DS_Store
+Thumbs.db
+Desktop.ini
+ehthumbs.db
+ehthumbs_vista.db
+*.lnk
+
+# ------ Logs / Runtime Data ------
+blinkguard.log
+blinkguard.port
+settings.json
+
+# ------ Graphify ------
+graphify-out/
+blink_guard/graphify-out/
+
+# ------ Gemini / Agent ------
+.gemini/
