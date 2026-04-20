@@ -1,0 +1,29 @@
+[project]
+name = "blink-guard"
+version = "1.0.0"
+description = "Adaptive blink rate monitor for eye health"
+requires-python = ">=3.10"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+addopts = "-v --tb=short"
+
+[tool.coverage.run]
+source = ["blink_guard"]
+omit = [
+    "blink_guard/ui/*",
+    "blink_guard/main.py",
+    "blink_guard/dashboard.py",
+    "blink_guard/tray.py",
+    "blink_guard/detector.py",
+    "blink_guard/alerts.py",
+    "blink_guard/startup.py",
+    "blink_guard/weekly.py",
+    "blink_guard/ipc.py",
+    "blink_guard/session.py",
+]
+
+[tool.coverage.report]
+show_missing = true
+fail_under = 85
