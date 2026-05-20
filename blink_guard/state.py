@@ -92,6 +92,7 @@ class SharedState:
         self.escalation_counts: dict = {}
         self.dnd_active: bool = False
         self.dnd_end_time: str | None = None
+        self.eye_mode: str = "both"  # "both", "left_only", or "right_only"
 
     # ---- helpers ---------------------------------------------------------
 

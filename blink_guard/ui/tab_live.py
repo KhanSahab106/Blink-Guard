@@ -13,6 +13,7 @@ import io
 from collections import deque
 
 import customtkinter as ctk
+import tkinter as tk
 from PIL import Image, ImageTk
 
 logger = logging.getLogger("BlinkGuard.Dashboard")
@@ -97,20 +98,21 @@ class LiveTab(ctk.CTkFrame):
         )
         self._pause_btn.grid(row=0, column=2, sticky="e")
 
-        # Camera canvas
-        self._cam_label = ctk.CTkLabel(
-            self._cam_frame, text="", fg_color="#111111", corner_radius=6,
+        # Camera canvas — use raw tkinter.Label for reliable video rendering
+        self._cam_label = tk.Label(
+            self._cam_frame, text="", bg="#111111",
+            borderwidth=0, highlightthickness=0,
         )
         self._cam_label.grid(row=1, column=0, sticky="nsew", padx=12, pady=(4, 12))
 
-        # Overlay text
+        # Overlay text (placed on top of camera label)
         self._overlay_text = ctk.CTkLabel(
-            self._cam_label, text="Connecting to BlinkGuard...",
+            self._cam_frame, text="Connecting to BlinkGuard...",
             text_color=TEXT_MUTED,
             font=ctk.CTkFont(family="Segoe UI", size=14),
             fg_color="transparent",
         )
-        self._overlay_text.place(relx=0.5, rely=0.5, anchor="center")
+        self._overlay_text.grid(row=1, column=0, sticky="")
 
     def _toggle_feed_pause(self) -> None:
         self._feed_paused = not self._feed_paused
@@ -118,7 +120,7 @@ class LiveTab(ctk.CTkFrame):
             self._pause_btn.configure(text="▶ Resume Feed")
             self._live_dot.configure(text="⏸ PAUSED", text_color=TEXT_MUTED)
             self._overlay_text.configure(text="Feed paused")
-            self._overlay_text.lift()
+            self._overlay_text.tkraise()
         else:
             self._pause_btn.configure(text="⏸ Pause Feed")
             self._live_dot.configure(text="● LIVE", text_color=RED)
@@ -323,7 +325,7 @@ class LiveTab(ctk.CTkFrame):
         if not self._feed_paused:
             if not face_detected:
                 self._overlay_text.configure(text="Face not detected")
-                self._overlay_text.lift()
+                self._overlay_text.tkraise()
             else:
                 self._overlay_text.configure(text="")
 
@@ -356,23 +358,32 @@ class LiveTab(ctk.CTkFrame):
             self._cam_frame.configure(border_color=SURFACE, border_width=0)
 
     def _update_camera_frame(self) -> None:
-        if not self.app.ipc.connected:
+        """Render the latest camera frame fetched by the IPC worker thread."""
+        frame_bytes = self.app._latest_frame
+        if not frame_bytes:
             return
-        frame_bytes = self.app.ipc.get_camera_frame()
-        if frame_bytes:
-            try:
-                img = Image.open(io.BytesIO(frame_bytes))
-                label_w = self._cam_label.winfo_width()
-                label_h = self._cam_label.winfo_height()
-                if label_w > 10 and label_h > 10:
-                    img = img.resize((label_w, label_h), Image.LANCZOS)
-                photo = ctk.CTkImage(light_image=img, dark_image=img,
-                                     size=(img.width, img.height))
-                self._cam_label.configure(image=photo, text="")
-                self._current_photo = photo
-                self._overlay_text.configure(text="")
-            except Exception:
-                pass
+        try:
+            img = Image.open(io.BytesIO(frame_bytes))
+            # Resize to fit the label
+            label_w = self._cam_label.winfo_width()
+            label_h = self._cam_label.winfo_height()
+            if label_w > 10 and label_h > 10:
+                # Maintain aspect ratio
+                img_ratio = img.width / img.height
+                label_ratio = label_w / label_h
+                if img_ratio > label_ratio:
+                    new_w = label_w
+                    new_h = int(label_w / img_ratio)
+                else:
+                    new_h = label_h
+                    new_w = int(label_h * img_ratio)
+                img = img.resize((new_w, new_h), Image.LANCZOS)
+            photo = ImageTk.PhotoImage(img)
+            self._cam_label.configure(image=photo)
+            self._cam_label._photo = photo  # prevent garbage collection
+            self._overlay_text.configure(text="")
+        except Exception:
+            logger.exception("Failed to render camera frame")
 
     def _draw_ear_graph(self) -> None:
         canvas = self._ear_canvas

@@ -101,6 +101,8 @@ class CalibrationWizard(ctk.CTkToplevel):
         self._face_mesh = None
         self._camera_thread = None
         self._current_photo = None
+        self._frame_lock = threading.Lock()
+        self._latest_frame = None  # latest BGR frame from camera thread
 
         # Calibration data
         self._blink_count = 0
@@ -168,13 +170,15 @@ class CalibrationWizard(ctk.CTkToplevel):
             text_color=TEXT,
         ).pack(pady=(10, 8))
 
-        # Camera preview
-        self._env_preview = ctk.CTkLabel(
+        # Camera preview — use raw tkinter.Label for reliable video
+        import tkinter as tk
+        self._env_preview = tk.Label(
             self._content, text="Starting camera...",
-            fg_color="#111111", corner_radius=6,
-            width=400, height=260,
+            bg="#111111", fg=MUTED,
+            borderwidth=0, highlightthickness=0,
+            width=56, height=18,  # approximate char-based sizing
         )
-        self._env_preview.pack(pady=(8, 8))
+        self._env_preview.pack(pady=(8, 8), fill="both", expand=True)
 
         self._env_status = ctk.CTkLabel(
             self._content, text="Analyzing lighting...",
@@ -204,7 +208,8 @@ class CalibrationWizard(ctk.CTkToplevel):
 
         # Start camera
         self._start_camera()
-        self.after(1000, self._analyze_lighting)
+        # Wait 2 seconds for camera to warm up before lighting analysis
+        self.after(2000, self._analyze_lighting)
 
     def _start_camera(self):
         if self._cap is not None:
@@ -231,6 +236,10 @@ class CalibrationWizard(ctk.CTkToplevel):
             if not ret:
                 time.sleep(0.05)
                 continue
+
+            # Store latest frame for lighting analysis (thread-safe)
+            with self._frame_lock:
+                self._latest_frame = frame.copy()
 
             rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             results = self._face_mesh.process(rgb)
@@ -277,30 +286,40 @@ class CalibrationWizard(ctk.CTkToplevel):
             tw = target.winfo_width()
             th = target.winfo_height()
             if tw > 10 and th > 10:
-                pil_img = pil_img.resize((tw, th), Image.LANCZOS)
+                # Maintain aspect ratio
+                img_ratio = pil_img.width / pil_img.height
+                label_ratio = tw / th
+                if img_ratio > label_ratio:
+                    new_w = tw
+                    new_h = int(tw / img_ratio)
+                else:
+                    new_h = th
+                    new_w = int(th * img_ratio)
+                pil_img = pil_img.resize((new_w, new_h), Image.LANCZOS)
         except Exception:
             pass
 
-        photo = ctk.CTkImage(light_image=pil_img, dark_image=pil_img,
-                             size=(pil_img.width, pil_img.height))
+        photo = ImageTk.PhotoImage(pil_img)
 
         def _set():
             try:
-                target.configure(image=photo, text="")
-                self._current_photo = photo
+                target.configure(image=photo)
+                target._photo = photo  # prevent garbage collection
             except Exception:
                 pass
 
         self.after(0, _set)
 
     def _analyze_lighting(self):
-        if not self._cap or not self._cap.isOpened():
-            self._env_status.configure(text="❌ Camera not available", text_color=RED)
-            return
+        """Analyze lighting using the latest frame from camera thread."""
+        # Use the buffered frame instead of calling cap.read() (avoids race)
+        with self._frame_lock:
+            frame = self._latest_frame.copy() if self._latest_frame is not None else None
 
-        ret, frame = self._cap.read()
-        if not ret:
-            self._env_status.configure(text="❌ Could not capture frame", text_color=RED)
+        if frame is None:
+            self._env_status.configure(text="❌ Waiting for camera...", text_color=RED)
+            # Retry in 1 second
+            self.after(1000, self._analyze_lighting)
             return
 
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
@@ -353,13 +372,14 @@ class CalibrationWizard(ctk.CTkToplevel):
             text_color=MUTED, justify="center",
         ).pack(pady=(0, 8))
 
-        # Camera preview
-        self._blink_preview = ctk.CTkLabel(
+        # Camera preview — use raw tkinter.Label for reliable video
+        import tkinter as tk
+        self._blink_preview = tk.Label(
             self._content, text="",
-            fg_color="#111111", corner_radius=6,
-            width=400, height=220,
+            bg="#111111",
+            borderwidth=0, highlightthickness=0,
         )
-        self._blink_preview.pack(pady=(4, 8))
+        self._blink_preview.pack(pady=(4, 8), fill="both", expand=True)
 
         # Blink counter
         self._blink_counter_label = ctk.CTkLabel(

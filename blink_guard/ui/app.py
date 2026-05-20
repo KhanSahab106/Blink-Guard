@@ -68,6 +68,7 @@ class DashboardApp(ctk.CTk):
         self.ipc = IPCClient()
         self._bg_running = False
         self._live_state: dict = {}
+        self._latest_frame: bytes | None = None  # camera frame from worker
 
         # -- Layout: sidebar + content --
         self.grid_columnconfigure(1, weight=1)
@@ -263,42 +264,93 @@ class DashboardApp(ctk.CTk):
         if hasattr(tab, "on_tab_selected"):
             tab.on_tab_selected()
 
-    # ---- IPC Polling ----------------------------------------------------
+    # ---- IPC Polling (background-threaded) --------------------------------
 
     def _start_polling(self) -> None:
-        """Begin polling the background process every 500ms."""
-        self._poll()
+        """Start a background thread for IPC and a fast UI timer to read results."""
+        import queue
+        self._ipc_queue: queue.Queue = queue.Queue()
+        self._ipc_stop = threading.Event()
+        self._last_connected = False
 
-    def _poll(self) -> None:
-        """Single polling tick."""
-        try:
-            if not self.ipc.connected:
-                success = self.ipc.connect()
-                self._bg_running = success
-                self._update_banner(success)
-                self._update_conn_label(success)
-            else:
+        # Background thread does all slow socket work
+        self._ipc_thread = threading.Thread(
+            target=self._ipc_worker, daemon=True, name="IPCWorker"
+        )
+        self._ipc_thread.start()
+
+        # UI timer reads results from the queue (never blocks)
+        self._poll_ui()
+
+    def _ipc_worker(self) -> None:
+        """Background thread: connect + fetch state + frame, push to queue."""
+        _frame_tick = 0
+        while not self._ipc_stop.is_set():
+            try:
+                if not self.ipc.connected:
+                    success = self.ipc.connect()
+                    self._ipc_queue.put(("conn", success))
+                    if not success:
+                        # Wait before retrying so we don't spin
+                        self._ipc_stop.wait(2.0)
+                        continue
+
+                # Connected — fetch state
                 state = self.ipc.get_live_state()
                 if state is None:
                     self.ipc.disconnect()
-                    self._bg_running = False
-                    self._update_banner(False)
-                    self._update_conn_label(False)
-                else:
-                    self._bg_running = True
-                    self._live_state = state
-                    self._update_banner(True)
-                    self._update_conn_label(True)
+                    self._ipc_queue.put(("conn", False))
+                    self._ipc_stop.wait(1.0)
+                    continue
 
-                    # Push state to the active tab
+                self._ipc_queue.put(("state", state))
+
+                # Fetch camera frame every 2nd tick (~0.8s) for responsive feed
+                _frame_tick += 1
+                if _frame_tick % 2 == 0:
+                    frame_data = self.ipc.get_camera_frame()
+                    if frame_data:
+                        self._ipc_queue.put(("frame", frame_data))
+
+            except Exception:
+                logger.exception("IPC worker error")
+                self._ipc_queue.put(("conn", False))
+
+            # Poll interval — 400ms when connected, 2s when disconnected
+            wait = 0.4 if self.ipc.connected else 2.0
+            self._ipc_stop.wait(wait)
+
+    def _poll_ui(self) -> None:
+        """Fast UI timer (100ms): drain the queue and update widgets."""
+        import queue
+        try:
+            while True:
+                kind, data = self._ipc_queue.get_nowait()
+                if kind == "conn":
+                    connected = bool(data)
+                    if connected != self._last_connected:
+                        self._last_connected = connected
+                        self._bg_running = connected
+                        self._update_banner(connected)
+                        self._update_conn_label(connected)
+                elif kind == "state":
+                    if not self._last_connected:
+                        self._last_connected = True
+                        self._bg_running = True
+                        self._update_banner(True)
+                        self._update_conn_label(True)
+                    self._live_state = data
                     active = self._tabs.get(self._active_tab)
                     if active and hasattr(active, "update_live_state"):
-                        active.update_live_state(state)
+                        active.update_live_state(data)
+                elif kind == "frame":
+                    self._latest_frame = data
+        except queue.Empty:
+            pass
         except Exception:
-            logger.exception("Poll error")
+            logger.exception("Poll UI error")
 
-        # Schedule next poll
-        self._poll_id = self.after(500, self._poll)
+        self._poll_id = self.after(100, self._poll_ui)
 
     def _update_banner(self, connected: bool) -> None:
         """Show/hide the 'not running' banner."""
@@ -318,32 +370,56 @@ class DashboardApp(ctk.CTk):
 
     def _launch_background(self) -> None:
         """Launch the BlinkGuard background process."""
-        try:
-            if getattr(sys, "frozen", False):
-                # Running as packaged exe — find BlinkGuard.exe next to us
-                exe_dir = os.path.dirname(sys.executable)
-                bg_exe = os.path.join(exe_dir, "BlinkGuard.exe")
-                if os.path.isfile(bg_exe):
-                    subprocess.Popen([bg_exe], creationflags=subprocess.DETACHED_PROCESS)
-                    logger.info("Launched BlinkGuard.exe")
+        self._launch_btn.configure(text="Launching...", state="disabled")
+
+        def _do_launch():
+            try:
+                if getattr(sys, "frozen", False):
+                    # Running as packaged exe — find BlinkGuard.exe next to us
+                    exe_dir = os.path.dirname(sys.executable)
+                    bg_exe = os.path.join(exe_dir, "BlinkGuard.exe")
+                    if os.path.isfile(bg_exe):
+                        subprocess.Popen(
+                            [bg_exe, "--skip-prompt"],
+                            creationflags=subprocess.CREATE_NEW_PROCESS_GROUP | 0x00000008,
+                        )
+                        logger.info("Launched BlinkGuard.exe")
+                    else:
+                        logger.error("BlinkGuard.exe not found at %s", bg_exe)
                 else:
-                    logger.error("BlinkGuard.exe not found at %s", bg_exe)
-            else:
-                # Dev mode — run main.py
-                base = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-                main_py = os.path.join(base, "blink_guard", "main.py")
-                subprocess.Popen(
-                    [sys.executable, main_py],
-                    creationflags=subprocess.DETACHED_PROCESS
-                )
-                logger.info("Launched main.py in background")
-        except Exception:
-            logger.exception("Failed to launch background process")
+                    # Dev mode — run main.py with correct PYTHONPATH
+                    project_root = os.path.dirname(
+                        os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+                    )
+                    main_py = os.path.join(project_root, "blink_guard", "main.py")
+                    env = os.environ.copy()
+                    env["PYTHONPATH"] = project_root + os.pathsep + env.get("PYTHONPATH", "")
+                    subprocess.Popen(
+                        [sys.executable, main_py, "--skip-prompt"],
+                        cwd=project_root,
+                        env=env,
+                        creationflags=subprocess.CREATE_NEW_PROCESS_GROUP | 0x00000008,
+                    )
+                    logger.info("Launched main.py from %s", project_root)
+            except Exception:
+                logger.exception("Failed to launch background process")
+            finally:
+                # Reset button on UI thread
+                self.after(2000, lambda: self._launch_btn.configure(
+                    text="Launch", state="normal"
+                ))
+
+        # Launch in a thread so the button doesn't freeze
+        threading.Thread(target=_do_launch, daemon=True).start()
 
     # ---- Cleanup --------------------------------------------------------
 
     def _on_close(self) -> None:
         """Clean shutdown."""
+        # Stop the IPC worker thread
+        if hasattr(self, "_ipc_stop"):
+            self._ipc_stop.set()
+
         if self._poll_id:
             self.after_cancel(self._poll_id)
         self.ipc.disconnect()

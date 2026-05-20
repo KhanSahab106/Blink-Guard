@@ -344,13 +344,18 @@ def main() -> None:
     init_sound()
 
     # Run calibration wizard if first launch (blocks until done)
-    _run_calibration_if_needed(shared)
+    # Skip when launched from dashboard to avoid invisible popups
+    if "--skip-prompt" not in sys.argv:
+        _run_calibration_if_needed(shared)
 
-    # Ask user to confirm session start
-    if not _show_session_prompt():
-        logger.info("User declined session — exiting.")
-        shutdown_sound()
-        return
+    # Ask user to confirm session start (skip if launched from dashboard)
+    if "--skip-prompt" not in sys.argv:
+        if not _show_session_prompt():
+            logger.info("User declined session — exiting.")
+            shutdown_sound()
+            return
+    else:
+        logger.info("Launched from dashboard — skipping session prompt.")
 
     # Start IPC server
     get_state_cb, get_frame_cb, cmd_cb = build_ipc_callbacks(shared)

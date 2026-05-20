@@ -16,6 +16,8 @@ Features:
 import time
 import datetime
 import logging
+from collections import deque
+from statistics import median
 
 import cv2
 import mediapipe as mp
@@ -66,6 +68,74 @@ def compute_ear(landmarks) -> float:
 def compute_ear_both(landmarks) -> tuple[float, float]:
     """Return (left_ear, right_ear)."""
     return _ear(landmarks, LEFT_EYE), _ear(landmarks, RIGHT_EYE)
+
+
+# ---------------------------------------------------------------------------
+# Per-eye reliability tracker (multi-monitor / angled viewing support)
+# ---------------------------------------------------------------------------
+
+OCCLUSION_RATIO = 0.60       # eye is "occluded" if its median < 60% of the other
+RELIABILITY_WINDOW = 30      # frames of open-state EAR to keep per eye
+
+
+class EyeReliabilityTracker:
+    """Track each eye's typical EAR over a rolling window.
+
+    When the user is angled toward a second monitor, the occluded eye's
+    landmarks become unreliable (compressed / noisy).  This tracker
+    detects that situation and tells the detector which eye(s) to trust.
+
+    Strategy:
+      - Record every EAR sample above a very low floor (0.05) to filter
+        only genuine full-blink frames.  This lets us capture the
+        *compressed* far-eye EAR (~0.15) that would otherwise be lost
+        if we filtered at the blink threshold (0.20).
+      - Compare median EAR of each eye; if one is much lower, it's
+        occluded → fall back to the reliable eye only.
+
+    Usage:
+        tracker = EyeReliabilityTracker()
+        ...
+        ear_left, ear_right = compute_ear_both(landmarks)
+        effective_ear, mode = tracker.update(ear_left, ear_right, ear_threshold)
+    """
+
+    CLOSED_EYE_FLOOR = 0.05  # below this, the eye is genuinely closed
+
+    def __init__(self, window: int = RELIABILITY_WINDOW):
+        self._left_hist: deque[float] = deque(maxlen=window)
+        self._right_hist: deque[float] = deque(maxlen=window)
+
+    def update(
+        self, ear_left: float, ear_right: float, blink_threshold: float
+    ) -> tuple[float, str]:
+        """Feed per-eye EAR values and return (effective_ear, mode).
+
+        *mode* is one of ``"both"``, ``"left_only"``, or ``"right_only"``.
+        """
+        # Record samples above the closed-eye floor (skip actual blinks)
+        if ear_left > self.CLOSED_EYE_FLOOR:
+            self._left_hist.append(ear_left)
+        if ear_right > self.CLOSED_EYE_FLOOR:
+            self._right_hist.append(ear_right)
+
+        # Need enough samples before making a decision
+        if len(self._left_hist) < 5 or len(self._right_hist) < 5:
+            return (ear_left + ear_right) / 2.0, "both"
+
+        med_left = median(self._left_hist)
+        med_right = median(self._right_hist)
+
+        # Determine which eye(s) are reliable
+        if med_left < OCCLUSION_RATIO * med_right:
+            # Left eye is likely occluded — trust right only
+            return ear_right, "right_only"
+        elif med_right < OCCLUSION_RATIO * med_left:
+            # Right eye is likely occluded — trust left only
+            return ear_left, "left_only"
+        else:
+            # Both eyes equally reliable — average
+            return (ear_left + ear_right) / 2.0, "both"
 
 
 # ---------------------------------------------------------------------------
@@ -145,6 +215,9 @@ def run_detector(shared: SharedState) -> None:
     last_blink_ts = time.time()
     grace_until = 0.0          # timestamp until we suppress new blinks
     frame_counter = 0          # for throttling JPEG encoding
+
+    # Per-eye reliability tracker (multi-monitor support)
+    eye_tracker = EyeReliabilityTracker()
 
     # Escalation state
     escalation_level = 0       # 0 = no alert, 1-3 = escalation levels
@@ -228,13 +301,17 @@ def run_detector(shared: SharedState) -> None:
             face_lms = results.multi_face_landmarks[0].landmark
             landmarks = face_lms
             ear_left, ear_right = compute_ear_both(landmarks)
-            ear = (ear_left + ear_right) / 2.0
+
+            # Dynamic single-eye fallback for multi-monitor setups
+            ear, eye_mode = eye_tracker.update(ear_left, ear_right, ear_threshold)
+            shared.eye_mode = eye_mode
 
             # Store EAR data for IPC
             shared.ear_left = ear_left
             shared.ear_right = ear_right
             shared.ear_history.append({"left": round(float(ear_left), 4),
-                                        "right": round(float(ear_right), 4)})
+                                        "right": round(float(ear_right), 4),
+                                        "mode": eye_mode})
             if len(shared.ear_history) > 100:
                 shared.ear_history = shared.ear_history[-100:]
 
